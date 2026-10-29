@@ -122,10 +122,116 @@ class Spotify:
             logger.error(f"Error fetching Spotify embed entity for {item_type}/{item_id}: {e}")
         return None
 
+    async def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Searches for tracks on Spotify.
+        Uses Spotipy if client credentials exist, otherwise falls back to yt-dlp flat audio search.
+        """
+        if self._sp:
+            try:
+                loop = asyncio.get_running_loop()
+                results = await loop.run_in_executor(
+                    None,
+                    lambda: self._sp.search(q=query, type="track", limit=limit)
+                )
+                items = (results.get("tracks") or {}).get("items") or []
+                hits = []
+                for item in items:
+                    tid = item.get("id")
+                    if not tid:
+                        continue
+                    artists = ", ".join(a["name"] for a in item.get("artists", []))
+                    album_info = item.get("album", {})
+                    album_name = album_info.get("name", "")
+                    images = album_info.get("images", [])
+                    image_url = images[0]["url"] if images else ""
+                    hits.append({
+                        "id": tid,
+                        "title": html.unescape(item.get("name", "Unknown")),
+                        "artists": artists,
+                        "album": album_name,
+                        "duration": int(item.get("duration_ms", 0) / 1000),
+                        "image": image_url,
+                        "url": f"https://open.spotify.com/track/{tid}"
+                    })
+                if hits:
+                    return hits
+            except Exception as e:
+                logger.warning(f"Spotipy search failed: {e}")
+
+        # Fallback via yt-dlp flat search
+        if yt_dlp:
+            try:
+                loop = asyncio.get_running_loop()
+                ydl_opts = {
+                    "quiet": True,
+                    "extract_flat": True,
+                    "default_search": f"ytsearch{limit}",
+                    "no_warnings": True,
+                    "extractor_args": {
+                        "youtube": {
+                            "player_client": ["android", "web"]
+                        }
+                    }
+                }
+                def _run_flat():
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        return ydl.extract_info(f"ytsearch{limit}:{query} audio", download=False)
+
+                res = await loop.run_in_executor(None, _run_flat)
+                entries = (res.get("entries") or [])[:limit]
+                hits = []
+                for entry in entries:
+                    vid = entry.get("id")
+                    if not vid:
+                        continue
+                    v_title = entry.get("title", "Unknown")
+                    v_uploader = entry.get("uploader") or entry.get("channel", "Unknown Artist")
+                    hits.append({
+                        "id": f"yt_{vid}",
+                        "title": v_title,
+                        "artists": v_uploader,
+                        "album": "Single",
+                        "duration": int(entry.get("duration") or 0),
+                        "image": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                        "url": f"https://www.youtube.com/watch?v={vid}"
+                    })
+                return hits
+            except Exception as e:
+                logger.error(f"Fallback search failed: {e}")
+
+        return []
+
     async def get_track(self, track_id: str) -> Optional[Dict[str, Any]]:
         """
         Retrieves track metadata for a given Spotify track ID.
         """
+        # Handle YouTube fallback ID
+        if track_id.startswith("yt_"):
+            vid = track_id.replace("yt_", "", 1)
+            video_url = f"https://www.youtube.com/watch?v={vid}"
+            loop = asyncio.get_running_loop()
+            def _get_yt():
+                with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
+                    return ydl.extract_info(video_url, download=False)
+            try:
+                info = await loop.run_in_executor(None, _get_yt)
+                return {
+                    "id": track_id,
+                    "title": html.unescape(info.get("title", "Unknown Title")),
+                    "artists": info.get("uploader") or info.get("channel", "Unknown Artist"),
+                    "album": "Single",
+                    "album_url": "",
+                    "release_date": info.get("upload_date", ""),
+                    "year": str(info.get("upload_date", ""))[:4] if info.get("upload_date") else "",
+                    "duration": int(info.get("duration", 0)),
+                    "image": info.get("thumbnail", f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"),
+                    "url": video_url,
+                    "source": "youtube"
+                }
+            except Exception as e:
+                logger.error(f"Error fetching YouTube track info for {vid}: {e}")
+
         # Try official Spotipy if configured
         if self._sp:
             try:
@@ -369,8 +475,11 @@ class Spotify:
                 logger.warning(f"Failed to download cover image: {e}")
 
         # 2. Download audio via yt-dlp in a thread
-        query = f"ytsearch1:{artists} - {title} audio"
-        logger.info(f"Searching & downloading for Spotify track: {query}")
+        if track_data.get("url") and "youtube.com" in track_data.get("url"):
+            query = track_data["url"]
+        else:
+            query = f"ytsearch1:{artists} - {title} audio"
+        logger.info(f"Downloading track via yt-dlp: {query}")
 
         has_ffmpeg = bool(shutil.which("ffmpeg"))
         bitrate_str = "320" if quality == "320kbps" else "160"

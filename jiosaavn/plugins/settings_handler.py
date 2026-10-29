@@ -14,7 +14,7 @@ VALID_REACTION_EMOJIS = ["👍", "👎", "😊", "😢", "😍", "🔥", "🎉"]
 
 @Bot.on_message(filters.command("settings"))
 @Bot.on_callback_query(filters.regex(r"^settings"))
-async def settings(client: Bot, message: Message|CallbackQuery):
+async def settings(client: Bot, message: Message | CallbackQuery):
     # Try to get random emoji
     try:
         from jiosaavn.plugins.text import TEXT
@@ -46,7 +46,7 @@ async def settings(client: Bot, message: Message|CallbackQuery):
         if len(data) > 1:
             try:
                 _, key, value = data
-                if key in ["type", "quality"] and value:  # Validate key and value
+                if key in ["type", "quality", "provider"] and value:  # Validate key and value
                     await client.db.update_user(message.from_user.id, key, value)
                     logger.info(f"Updated user {message.from_user.id} with {key}={value}")
                 else:
@@ -58,6 +58,10 @@ async def settings(client: Bot, message: Message|CallbackQuery):
     user = await client.db.get_user(message.from_user.id)
     type = user.get('type', 'all')
     quality = user.get('quality', '320kbps')
+    provider = user.get('provider', 'jiosaavn')
+
+    provider_jiosaavn = '✅ JioSaavn' if provider == 'jiosaavn' else 'JioSaavn'
+    provider_spotify = '✅ Spotify' if provider == 'spotify' else 'Spotify'
 
     all = '✅ All' if type == 'all' else 'All'
     albums = '✅ Albums' if type == 'albums' else 'Albums' 
@@ -68,6 +72,13 @@ async def settings(client: Bot, message: Message|CallbackQuery):
     quality_160 = '✅ 160kbps' if quality == '160kbps' else '160kbps'
     
     buttons = [
+        [
+            InlineKeyboardButton("𝐌𝐮𝐬𝐢𝐜 𝐏𝐫𝐨𝐯𝐢𝐝𝐞𝐫 🎧", callback_data="dummy"),
+        ],
+        [
+            InlineKeyboardButton(provider_jiosaavn, callback_data='settings#provider#jiosaavn'),
+            InlineKeyboardButton(provider_spotify, callback_data='settings#provider#spotify'),
+        ],
         [
             InlineKeyboardButton("𝐒𝐞𝐚𝐫𝐜𝐡 𝐓𝐲𝐩𝐞 🔍", callback_data="dummy"),
         ],
@@ -92,7 +103,7 @@ async def settings(client: Bot, message: Message|CallbackQuery):
         ]
     ]
 
-    text = '**Select the search result type and music quality 🧏‍♂️**'
+    text = '**Select your default search provider, result type, and audio quality 🧏‍♂️**'
     try:
         if msg.text != text or msg.reply_markup != InlineKeyboardMarkup(buttons):
             await msg.edit(text, reply_markup=InlineKeyboardMarkup(buttons))

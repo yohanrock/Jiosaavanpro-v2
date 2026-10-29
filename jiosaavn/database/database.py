@@ -31,6 +31,7 @@ class Database:
             'join_date': datetime.date.today().isoformat(),
             'type': 'all',
             'quality': '320kbps',
+            'provider': 'jiosaavn',
             'ban_status': {
                 'is_banned': False,
                 'ban_duration': 0,
@@ -76,6 +77,8 @@ class Database:
         user = await self.user_collection.find_one({'id': user_id})
         if not user:
             user = await self.add_user(user_id)
+        if 'provider' not in user:
+            user['provider'] = 'jiosaavn'
         return user
 
     async def update_user(self, user_id: int, key: str, value: any):
