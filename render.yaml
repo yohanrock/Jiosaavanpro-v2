@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: jiosaavanpro-bot
+    runtime: python
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: pip install -U pip && pip install -r requirements.txt
+    startCommand: python -m jiosaavn
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: HOST
+        value: 0.0.0.0
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SPOTIFY_CLIENT_ID
+        sync: false
+      - key: SPOTIFY_CLIENT_SECRET
+        sync: false
