@@ -15,6 +15,11 @@ try:
 except ImportError:
     spotipy = None
 
+try:
+    import SpotipyFree
+except ImportError:
+    SpotipyFree = None
+
 logger = logging.getLogger(__name__)
 
 SPOTIFY_TRACK_PATTERN = re.compile(r"https?://open\.spotify\.com/(?:intl-[a-zA-Z]{2}/)?track/([a-zA-Z0-9]+)")
@@ -43,6 +48,12 @@ class Spotify:
                 self._sp = spotipy.Spotify(client_credentials_manager=auth_mgr)
             except Exception as e:
                 logger.warning(f"Failed to initialize spotipy client: {e}")
+
+        if not self._sp and SpotipyFree:
+            try:
+                self._sp = SpotipyFree.Spotify()
+            except Exception as e:
+                logger.warning(f"Failed to initialize SpotipyFree client: {e}")
 
     @staticmethod
     def is_spotify_url(url: str) -> bool:
@@ -115,10 +126,10 @@ class Spotify:
             logger.error(f"Error fetching Spotify embed entity for {item_type}/{item_id}: {e}")
         return None
 
-    async def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    async def search(self, query: str, limit: int = 25) -> List[Dict[str, Any]]:
         """
         Searches for tracks on Spotify.
-        Uses Spotipy if client credentials exist, otherwise queries JioSaavn directly.
+        Uses Spotipy or SpotipyFree to retrieve authentic Spotify tracks.
         """
         if self._sp:
             try:
@@ -126,15 +137,15 @@ class Spotify:
                 loop = asyncio.get_running_loop()
                 results = await loop.run_in_executor(
                     None,
-                    lambda: self._sp.search(q=query, type="track", limit=limit)
+                    lambda: self._sp.search(query, type="track", limit=limit)
                 )
                 items = (results.get("tracks") or {}).get("items") or []
                 hits = []
-                for item in items:
-                    tid = item.get("id")
+                for item in items[:limit]:
+                    tid = item.get("id") or item.get("track_id")
                     if not tid:
                         continue
-                    artists = ", ".join(a["name"] for a in item.get("artists", []))
+                    artists = ", ".join(a.get("name", "") for a in item.get("artists", []))
                     album_info = item.get("album", {})
                     album_name = album_info.get("name", "")
                     images = album_info.get("images", [])
@@ -151,33 +162,7 @@ class Spotify:
                 if hits:
                     return hits
             except Exception as e:
-                logger.warning(f"Spotipy search failed: {e}")
-
-        # Direct search fallback
-        try:
-            js = Jiosaavn()
-            res = await js.search(query=query, search_type="songs", page_no=1, page_size=limit)
-            songs = res.get("results", [])
-            hits = []
-            for s in songs:
-                perma_url = s.get("perma_url", "")
-                sid = perma_url.rsplit("/", 1)[-1]
-                if not sid:
-                    continue
-                more = s.get("more_info", {})
-                music = more.get("music") or s.get("subtitle", "")
-                hits.append({
-                    "id": f"js_{sid}",
-                    "title": html.unescape(s.get("title", "Unknown")),
-                    "artists": html.unescape(music),
-                    "album": html.unescape(more.get("album", "")),
-                    "duration": int(more.get("duration", 0)),
-                    "image": s.get("image", "").replace("150x150", "500x500"),
-                    "url": perma_url
-                })
-            return hits
-        except Exception as e:
-            logger.error(f"Search fallback failed: {e}")
+                logger.warning(f"Spotify search failed: {e}")
 
         return []
 
@@ -215,7 +200,7 @@ class Spotify:
                 import asyncio
                 loop = asyncio.get_running_loop()
                 track_info = await loop.run_in_executor(None, self._sp.track, track_id)
-                artists = ", ".join(a["name"] for a in track_info.get("artists", []))
+                artists = ", ".join(a.get("name", "") if isinstance(a, dict) else str(a) for a in track_info.get("artists", []))
                 album_info = track_info.get("album", {})
                 album_name = album_info.get("name", "Unknown Album")
                 album_url = album_info.get("external_urls", {}).get("spotify", "")

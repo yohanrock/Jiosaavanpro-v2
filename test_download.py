@@ -74,6 +74,31 @@ async def test_download(url: str):
             print("Song not found or invalid JioSaavn URL.")
 
 
+async def test_search(query: str):
+    print(f"\n==========================================")
+    print(f"Testing Spotify Search Query: '{query}'")
+    print(f"==========================================\n")
+    sp = Spotify()
+    hits = await sp.search(query=query, limit=10)
+    print(f"Found {len(hits)} Spotify tracks:\n")
+    for i, h in enumerate(hits, 1):
+        print(f"  {i}. {h['title']} - {h['artists']} [{h['album']}] (id: {h['id']})")
+        print(f"     URL: {h['url']}")
+
+    if hits:
+        top_hit = hits[0]
+        print(f"\nDownloading top result to verify: '{top_hit['title']}'...")
+        download_dir = os.path.abspath("./downloads")
+        audio_path, thumb_path = await sp.download_track(top_hit, download_dir, "320kbps")
+        print(f"\n[SUCCESS]")
+        print(f"Audio file saved to: {audio_path} ({os.path.getsize(audio_path):,} bytes)")
+        if os.path.exists(thumb_path):
+            print(f"Cover image saved to: {thumb_path}")
+
+
 if __name__ == "__main__":
-    target_url = sys.argv[1] if len(sys.argv) > 1 else "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT"
-    asyncio.run(test_download(target_url))
+    arg = sys.argv[1] if len(sys.argv) > 1 else "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT"
+    if arg.startswith("http"):
+        asyncio.run(test_download(arg))
+    else:
+        asyncio.run(test_search(arg))

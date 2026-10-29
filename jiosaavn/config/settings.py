@@ -6,6 +6,8 @@ BOT_TOKEN = getenv("BOT_TOKEN", "8498699646:AAEAQIEDZQip-HPUuSnW79ptCkn1sd5hvpM"
 BOT_COMMANDS = (
     ("start", "Initialize the bot and check its status"),
     ("settings", "Configure and manage bot settings"),
+    ("sp", "Search and download from Spotify (/sp <song>)"),
+    ("js", "Search and download from JioSaavn (/js <song>)"),
     ("help", "Get information on how to use the bot"),
     ("about", "Learn more about the bot and its features"),
 )

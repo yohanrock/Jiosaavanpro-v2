@@ -10,3 +10,5 @@ python-dotenv
 tgcrypto-pyrofork
 aiohttp[speedups]
 spotipy
+SpotipyFree
+websockets

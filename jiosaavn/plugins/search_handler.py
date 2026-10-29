@@ -14,90 +14,99 @@ from pyrogram.errors import MessageNotModified
 logger = logging.getLogger(__name__)
 
 
-@Bot.on_callback_query(filters.regex(r"^switch_provider#"))
-async def switch_provider_cb(client: Bot, callback: CallbackQuery):
-    await callback.answer()
-    new_provider = callback.data.split("#")[1]
-    await client.db.update_user(callback.from_user.id, "provider", new_provider)
-    await search(client, callback)
-
-
-@Bot.on_callback_query(filters.regex(r"^search#"))
-@Bot.on_message(
-    filters.text & filters.incoming & filters.private & 
-    ~filters.regex(r'^http.*') & ~filters.via_bot & 
-    ~filters.command(["start", "settings", "help", "about"])
-)
-async def search(client: Bot, message: Message | CallbackQuery):
+def extract_query(message: Message | CallbackQuery) -> str:
+    """Extract search query safely from a message or callback."""
     if isinstance(message, Message):
-        send_msg = await message.reply("__**Processing... ⏳**__", quote=True)
-        query = message.text.strip()
-    else:
-        try:
-            await message.answer()
-        except Exception:
-            pass
-        send_msg = message.message
-        if getattr(message.message, "reply_to_message", None) and message.message.reply_to_message.text:
-            query = message.message.reply_to_message.text.strip()
-        else:
-            query = ""
-            for line in (message.message.text or "").split("\n"):
-                if "Search Query:" in line or "Results for:" in line:
-                    query = line.split(":", 1)[1].strip(" *`")
-                    break
+        text = message.text or ""
+        if text.startswith(("/", "!")):
+            parts = text.split(maxsplit=1)
+            return parts[1].strip() if len(parts) > 1 else ""
+        return text.strip()
 
-    if not query:
-        return await send_msg.edit("⚠️ Please send a valid search text.")
+    # CallbackQuery
+    msg = getattr(message, "message", None)
+    if not msg:
+        return ""
 
-    user_data = await client.db.get_user(message.from_user.id)
-    provider = user_data.get('provider', 'jiosaavn')
-    search_type = user_data.get('type', 'all')
-    page_no = 1
+    if getattr(msg, "reply_to_message", None) and msg.reply_to_message.text:
+        text = msg.reply_to_message.text.strip()
+        if text.startswith(("/", "!")):
+            parts = text.split(maxsplit=1)
+            return parts[1].strip() if len(parts) > 1 else ""
+        return text
 
-    if isinstance(message, CallbackQuery) and message.data.startswith("search#"):
-        data = message.data.split('#')
-        search_type = data[1]
-        if len(data) == 3:
-            page_no = int(data[2])
+    for line in (msg.text or "").split("\n"):
+        if "Search Query:" in line or "Results for:" in line:
+            return line.split(":", 1)[1].strip(" *`")
+    return ""
 
-    # 1. Spotify Search Provider
-    if provider == "spotify":
-        sp = Spotify(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
-        try:
-            hits = await sp.search(query=query, limit=10)
-        except Exception as e:
-            logger.error(f"Spotify search error: {e}")
-            return await send_msg.edit(f"⚠️ Error searching Spotify: {e}")
 
-        if not hits:
-            buttons = [
-                [InlineKeyboardButton("Switch to JioSaavn 🎵", callback_data="switch_provider#jiosaavn")],
-                [InlineKeyboardButton("Close ❌", callback_data="close")]
-            ]
-            return await send_msg.edit(
-                f"🔎 No Spotify results found for `{query}`",
-                reply_markup=InlineKeyboardMarkup(buttons)
-            )
+async def perform_spotify_search(client: Bot, send_msg: Message, query: str, page_no: int = 1):
+    """Executes a search on Spotify and renders paginated results."""
+    sp = Spotify(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
+    try:
+        hits = await sp.search(query=query, limit=35)
+    except Exception as e:
+        logger.error(f"Spotify search error: {e}")
+        return await send_msg.edit(f"⚠️ Error searching Spotify: {e}")
 
-        buttons = []
-        for hit in hits:
-            title = hit.get("title", "Unknown")
-            artists = hit.get("artists", "Unknown")
-            track_id = hit.get("id")
-            button_label = f"🎧 {title} - {artists}"
-            if len(button_label) > 60:
-                button_label = button_label[:57] + "..."
-            buttons.append([InlineKeyboardButton(text=button_label, callback_data=f"upload#sp_{track_id}#song")])
+    if not hits:
+        buttons = [
+            [InlineKeyboardButton("Switch to JioSaavn 🎵", callback_data="switch_provider#jiosaavn")],
+            [InlineKeyboardButton("Close ❌", callback_data="close")]
+        ]
+        return await send_msg.edit(
+            f"**🎧 Spotify Results**\n**🔍 Search Query:** `{query}`\n\n🔎 No Spotify results found for your query.",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
 
-        buttons.append([
-            InlineKeyboardButton("Switch to JioSaavn 🎵", callback_data="switch_provider#jiosaavn"),
-            InlineKeyboardButton("Close ❌", callback_data="close")
-        ])
-        text = f"**🎧 Spotify Results for:** `{query}`\n\n__Click a track below to download & upload 👇__"
-        return await send_msg.edit(text, reply_markup=InlineKeyboardMarkup(buttons))
+    page_size = 7
+    total_hits = len(hits)
+    total_pages = (total_hits + page_size - 1) // page_size or 1
+    page_no = max(1, min(page_no, total_pages))
+    start_idx = (page_no - 1) * page_size
+    page_hits = hits[start_idx:start_idx + page_size]
 
-    # 2. JioSaavn Search Provider
+    buttons = []
+    for hit in page_hits:
+        title = hit.get("title", "Unknown")
+        artists = hit.get("artists", "Unknown")
+        track_id = hit.get("id")
+        button_label = f"🎧 {title} - {artists}"
+        if len(button_label) > 55:
+            button_label = button_label[:52] + "..."
+        buttons.append([InlineKeyboardButton(text=button_label, callback_data=f"upload#sp_{track_id}#song")])
+
+    nav_buttons = []
+    if page_no > 1:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"search#spotify#{page_no-1}"))
+    if page_no < total_pages:
+        nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"search#spotify#{page_no+1}"))
+    if nav_buttons:
+        buttons.append(nav_buttons)
+
+    buttons.append([
+        InlineKeyboardButton("Switch to JioSaavn 🎵", callback_data="switch_provider#jiosaavn"),
+        InlineKeyboardButton("Close ❌", callback_data="close")
+    ])
+
+    text = (
+        f"**🎧 Spotify Results**\n"
+        f"**🔍 Search Query:** `{query}`\n"
+        f"**📈 Total Results:** `{total_hits}`\n"
+        f"**📜 Page No:** `{page_no}/{total_pages}`\n\n"
+        f"__Click a track below to download & upload 👇__"
+    )
+    try:
+        await send_msg.edit(text, reply_markup=InlineKeyboardMarkup(buttons))
+    except MessageNotModified:
+        pass
+    except Exception as e:
+        logger.error(f"Error editing message in perform_spotify_search: {e}")
+
+
+async def perform_jiosaavn_search(client: Bot, send_msg: Message, query: str, search_type: str = "all", page_no: int = 1):
+    """Executes a search on JioSaavn and renders results."""
     try:
         if search_type in ('all', 'topquery'):
             response = await Jiosaavn().search_all_types(query=query)
@@ -105,8 +114,7 @@ async def search(client: Bot, message: Message | CallbackQuery):
             response = await Jiosaavn().search(query=query, search_type=search_type, page_no=page_no)
     except RuntimeError as e:
         logger.error(e)
-        traceback.print_exc()
-        return await send_msg.edit("Connection refused by jiosaavn api. Please try again")
+        return await send_msg.edit("Connection refused by JioSaavn API. Please try again.")
 
     if not response:
         buttons = [
@@ -114,7 +122,7 @@ async def search(client: Bot, message: Message | CallbackQuery):
             [InlineKeyboardButton("Close ❌", callback_data="close")]
         ]
         return await send_msg.edit(
-            f'🔎 No JioSaavn search result found for your query `{query}`',
+            f"**🎵 JioSaavn Results**\n**🔍 Search Query:** `{query}`\n\n🔎 No JioSaavn results found for your query.",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
 
@@ -160,7 +168,7 @@ async def search(client: Bot, message: Message | CallbackQuery):
                 if result.get("data"):
                     button_label, callback_data = button_song_type_map.get(result_type, (None, None))
                     buttons.append([InlineKeyboardButton(text=button_label, callback_data=callback_data)])
-        text = f"**🔍 Search Query:** {query}\n\n__Please select one category 👇__"
+        text = f"**🎵 JioSaavn Results**\n**🔍 Search Query:** `{query}`\n\n__Please select one category 👇__"
     else:
         total_results = response.get("total", 0)
 
@@ -185,29 +193,114 @@ async def search(client: Bot, message: Message | CallbackQuery):
             if button_label:
                 buttons.append([InlineKeyboardButton(text=button_label, callback_data=f"{result_type}#{item_id}")])
 
-        text = f"**📈 Total Results:** {total_results}\n\n**🔍 Search Query:** {query}\n\n**📜 Page No:** {page_no}"
+        text = (
+            f"**🎵 JioSaavn Results**\n"
+            f"**🔍 Search Query:** `{query}`\n"
+            f"**📈 Total Results:** `{total_results}`\n"
+            f"**📜 Page No:** `{page_no}`"
+        )
         navigation_buttons = []
         if page_no > 1:
-            navigation_buttons.append(InlineKeyboardButton("⬅️", callback_data=f"search#{search_type}#{page_no-1}"))
+            navigation_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"search#{search_type}#{page_no-1}"))
         if total_results > 10 * page_no:
-            navigation_buttons.append(InlineKeyboardButton("➡️", callback_data=f"search#{search_type}#{page_no+1}"))
+            navigation_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"search#{search_type}#{page_no+1}"))
         if navigation_buttons:
             buttons.append(navigation_buttons)
 
     if not buttons:
         buttons = [[InlineKeyboardButton("Switch to Spotify 🎧", callback_data="switch_provider#spotify")]]
         buttons.append([InlineKeyboardButton('Close ❌', callback_data="close")])
-        return await send_msg.edit(f'🔎 No search result found for your query `{query}`', reply_markup=InlineKeyboardMarkup(buttons))
+        return await send_msg.edit(
+            f"**🎵 JioSaavn Results**\n**🔍 Search Query:** `{query}`\n\n🔎 No JioSaavn results found for your query.",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
 
     buttons.append([
         InlineKeyboardButton("Switch to Spotify 🎧", callback_data="switch_provider#spotify"),
         InlineKeyboardButton('Close ❌', callback_data="close")
     ])
     try:
-        if send_msg.text != text or send_msg.reply_markup != InlineKeyboardMarkup(buttons):
-            await send_msg.edit(text, reply_markup=InlineKeyboardMarkup(buttons))
+        await send_msg.edit(text, reply_markup=InlineKeyboardMarkup(buttons))
     except MessageNotModified:
-        logger.warning("Message not modified in search_handler")
+        pass
     except Exception as e:
-        logger.error(f"Failed to edit message in search_handler: {e}")
-        await send_msg.edit("An error occurred while updating search results.")
+        logger.error(f"Error editing message in perform_jiosaavn_search: {e}")
+
+
+@Bot.on_message(filters.command(["spotify", "sp"]) & filters.private & filters.incoming)
+async def spotify_search_cmd(client: Bot, message: Message):
+    """Shortcut command to search Spotify directly (/sp <song name>)."""
+    if len(message.command) < 2:
+        return await message.reply("⚠️ **Usage:** `/sp <song name>` or `/spotify <song name>`", quote=True)
+    query = " ".join(message.command[1:]).strip()
+    send_msg = await message.reply("__**Searching Spotify... ⏳**__", quote=True)
+    await perform_spotify_search(client, send_msg, query, page_no=1)
+
+
+@Bot.on_message(filters.command(["saavn", "jiosaavn", "js"]) & filters.private & filters.incoming)
+async def saavn_search_cmd(client: Bot, message: Message):
+    """Shortcut command to search JioSaavn directly (/js <song name>)."""
+    if len(message.command) < 2:
+        return await message.reply("⚠️ **Usage:** `/js <song name>` or `/saavn <song name>`", quote=True)
+    query = " ".join(message.command[1:]).strip()
+    send_msg = await message.reply("__**Searching JioSaavn... ⏳**__", quote=True)
+    user_data = await client.db.get_user(message.from_user.id)
+    search_type = user_data.get('type', 'all')
+    await perform_jiosaavn_search(client, send_msg, query, search_type=search_type, page_no=1)
+
+
+@Bot.on_callback_query(filters.regex(r"^switch_provider#"))
+async def switch_provider_cb(client: Bot, callback: CallbackQuery):
+    """Handles switching provider on the fly from search results."""
+    await callback.answer()
+    new_provider = callback.data.split("#")[1]
+    await client.db.update_user(callback.from_user.id, "provider", new_provider)
+    query = extract_query(callback)
+
+    if not query:
+        return await callback.message.edit(f"Provider switched to **{new_provider.capitalize()}**! Please send your song name.")
+
+    user_data = await client.db.get_user(callback.from_user.id)
+    if new_provider == "spotify":
+        await perform_spotify_search(client, callback.message, query, page_no=1)
+    else:
+        search_type = user_data.get('type', 'all')
+        await perform_jiosaavn_search(client, callback.message, query, search_type=search_type, page_no=1)
+
+
+@Bot.on_callback_query(filters.regex(r"^search#"))
+@Bot.on_message(
+    filters.text & filters.incoming & filters.private & 
+    ~filters.regex(r'^http.*') & ~filters.via_bot & 
+    ~filters.command(["start", "settings", "help", "about", "spotify", "sp", "saavn", "jiosaavn", "js"])
+)
+async def search(client: Bot, message: Message | CallbackQuery):
+    """Default text search handler based on user's selected provider."""
+    query = extract_query(message)
+    if isinstance(message, Message):
+        send_msg = await message.reply("__**Processing... ⏳**__", quote=True)
+    else:
+        try:
+            await message.answer()
+        except Exception:
+            pass
+        send_msg = message.message
+
+    if not query:
+        return await send_msg.edit("⚠️ Please send a valid search text.")
+
+    user_data = await client.db.get_user(message.from_user.id)
+    provider = user_data.get('provider', 'jiosaavn')
+    search_type = user_data.get('type', 'all')
+    page_no = 1
+
+    if isinstance(message, CallbackQuery) and message.data.startswith("search#"):
+        data = message.data.split('#')
+        search_type = data[1]
+        if len(data) == 3:
+            page_no = int(data[2])
+
+    if search_type == "spotify" or provider == "spotify":
+        await perform_spotify_search(client, send_msg, query, page_no=page_no)
+    else:
+        await perform_jiosaavn_search(client, send_msg, query, search_type=search_type, page_no=page_no)
