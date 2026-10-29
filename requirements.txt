@@ -9,5 +9,4 @@ humanfriendly
 python-dotenv
 tgcrypto-pyrofork
 aiohttp[speedups]
-yt-dlp
 spotipy

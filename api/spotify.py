@@ -1,27 +1,19 @@
 import os
 import re
 import html
-import shutil
-import asyncio
 import logging
 from typing import Dict, Any, Optional, Tuple, List
 import aiohttp
 import aiofiles
 
-from mutagen.mp3 import MP3
-from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TDRC, COMM
 from mutagen.mp4 import MP4, MP4Cover
+from api.jiosaavn import Jiosaavn
 
 try:
     import spotipy
     from spotipy.oauth2 import SpotifyClientCredentials
 except ImportError:
     spotipy = None
-
-try:
-    import yt_dlp
-except ImportError:
-    yt_dlp = None
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +26,8 @@ SPOTIFY_SHORT_PATTERN = re.compile(r"https?://spotify\.link/[a-zA-Z0-9]+")
 class Spotify:
     """
     Spotify client for parsing Spotify links (tracks, albums, playlists),
-    retrieving metadata, and downloading matching audio using yt-dlp.
+    retrieving Spotify metadata/artwork, and fetching matching high-fidelity
+    audio directly from the JioSaavn CDN. No YouTube dependencies.
     """
 
     def __init__(self, client_id: Optional[str] = None, client_secret: Optional[str] = None):
@@ -125,10 +118,11 @@ class Spotify:
     async def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
         Searches for tracks on Spotify.
-        Uses Spotipy if client credentials exist, otherwise falls back to yt-dlp flat audio search.
+        Uses Spotipy if client credentials exist, otherwise queries JioSaavn directly.
         """
         if self._sp:
             try:
+                import asyncio
                 loop = asyncio.get_running_loop()
                 results = await loop.run_in_executor(
                     None,
@@ -159,46 +153,31 @@ class Spotify:
             except Exception as e:
                 logger.warning(f"Spotipy search failed: {e}")
 
-        # Fallback via yt-dlp flat search
-        if yt_dlp:
-            try:
-                loop = asyncio.get_running_loop()
-                ydl_opts = {
-                    "quiet": True,
-                    "extract_flat": True,
-                    "default_search": f"ytsearch{limit}",
-                    "no_warnings": True,
-                    "extractor_args": {
-                        "youtube": {
-                            "player_client": ["android", "web"]
-                        }
-                    }
-                }
-                def _run_flat():
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        return ydl.extract_info(f"ytsearch{limit}:{query} audio", download=False)
-
-                res = await loop.run_in_executor(None, _run_flat)
-                entries = (res.get("entries") or [])[:limit]
-                hits = []
-                for entry in entries:
-                    vid = entry.get("id")
-                    if not vid:
-                        continue
-                    v_title = entry.get("title", "Unknown")
-                    v_uploader = entry.get("uploader") or entry.get("channel", "Unknown Artist")
-                    hits.append({
-                        "id": f"yt_{vid}",
-                        "title": v_title,
-                        "artists": v_uploader,
-                        "album": "Single",
-                        "duration": int(entry.get("duration") or 0),
-                        "image": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
-                        "url": f"https://www.youtube.com/watch?v={vid}"
-                    })
-                return hits
-            except Exception as e:
-                logger.error(f"Fallback search failed: {e}")
+        # Direct search fallback
+        try:
+            js = Jiosaavn()
+            res = await js.search(query=query, search_type="songs", page_no=1, page_size=limit)
+            songs = res.get("results", [])
+            hits = []
+            for s in songs:
+                perma_url = s.get("perma_url", "")
+                sid = perma_url.rsplit("/", 1)[-1]
+                if not sid:
+                    continue
+                more = s.get("more_info", {})
+                music = more.get("music") or s.get("subtitle", "")
+                hits.append({
+                    "id": f"js_{sid}",
+                    "title": html.unescape(s.get("title", "Unknown")),
+                    "artists": html.unescape(music),
+                    "album": html.unescape(more.get("album", "")),
+                    "duration": int(more.get("duration", 0)),
+                    "image": s.get("image", "").replace("150x150", "500x500"),
+                    "url": perma_url
+                })
+            return hits
+        except Exception as e:
+            logger.error(f"Search fallback failed: {e}")
 
         return []
 
@@ -206,35 +185,34 @@ class Spotify:
         """
         Retrieves track metadata for a given Spotify track ID.
         """
-        # Handle YouTube fallback ID
-        if track_id.startswith("yt_"):
-            vid = track_id.replace("yt_", "", 1)
-            video_url = f"https://www.youtube.com/watch?v={vid}"
-            loop = asyncio.get_running_loop()
-            def _get_yt():
-                with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
-                    return ydl.extract_info(video_url, download=False)
-            try:
-                info = await loop.run_in_executor(None, _get_yt)
+        # Handle direct JioSaavn ID
+        if track_id.startswith("js_"):
+            sid = track_id.replace("js_", "", 1)
+            js = Jiosaavn()
+            resp = await js.get_song(song_id=sid)
+            if resp and resp.get("songs"):
+                s = resp["songs"][0]
+                more = s.get("more_info", {})
+                artists = ", ".join(a.get("name", "") for a in more.get("artistMap", {}).get("artists", []))
+                artists = artists or more.get("music") or "Unknown Artist"
                 return {
                     "id": track_id,
-                    "title": html.unescape(info.get("title", "Unknown Title")),
-                    "artists": info.get("uploader") or info.get("channel", "Unknown Artist"),
-                    "album": "Single",
-                    "album_url": "",
-                    "release_date": info.get("upload_date", ""),
-                    "year": str(info.get("upload_date", ""))[:4] if info.get("upload_date") else "",
-                    "duration": int(info.get("duration", 0)),
-                    "image": info.get("thumbnail", f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"),
-                    "url": video_url,
-                    "source": "youtube"
+                    "title": html.unescape(s.get("title", "Unknown")),
+                    "artists": artists,
+                    "album": more.get("album", ""),
+                    "album_url": more.get("album_url", ""),
+                    "release_date": more.get("release_date", ""),
+                    "year": str(s.get("year", "")),
+                    "duration": int(more.get("duration", 0)),
+                    "image": s.get("image", "").replace("150x150", "500x500"),
+                    "url": s.get("perma_url", ""),
+                    "source": "jiosaavn"
                 }
-            except Exception as e:
-                logger.error(f"Error fetching YouTube track info for {vid}: {e}")
 
         # Try official Spotipy if configured
         if self._sp:
             try:
+                import asyncio
                 loop = asyncio.get_running_loop()
                 track_info = await loop.run_in_executor(None, self._sp.track, track_id)
                 artists = ", ".join(a["name"] for a in track_info.get("artists", []))
@@ -291,7 +269,6 @@ class Spotify:
         visual_identity = entity.get("visualIdentity", {})
         images = visual_identity.get("image", [])
         if images and isinstance(images, list):
-            # Prefer largest
             images_sorted = sorted(images, key=lambda x: x.get("maxWidth", 0), reverse=True)
             image_url = images_sorted[0].get("url", "")
 
@@ -342,6 +319,7 @@ class Spotify:
         # Try Spotipy official first
         if self._sp:
             try:
+                import asyncio
                 loop = asyncio.get_running_loop()
                 if item_type == "album":
                     album = await loop.run_in_executor(None, self._sp.album, item_id)
@@ -436,13 +414,12 @@ class Spotify:
         quality: str = "320kbps"
     ) -> Tuple[str, str]:
         """
-        Downloads a Spotify track via YouTube search matching and tags the file.
+        Downloads the Spotify track's audio directly from JioSaavn CDN (320kbps/160kbps),
+        fetches the high-res Spotify cover art, and writes ID3/MP4 metadata tags with mutagen.
+        Zero YouTube / yt-dlp dependencies.
         Returns:
             Tuple[str, str]: (audio_file_path, thumbnail_file_path)
         """
-        if not yt_dlp:
-            raise RuntimeError("yt-dlp is not installed. Please install yt-dlp.")
-
         os.makedirs(download_dir, exist_ok=True)
 
         title = track_data.get("title", "Unknown Track")
@@ -451,12 +428,12 @@ class Spotify:
         year = track_data.get("year", "")
         image_url = track_data.get("image", "")
 
-        # Clean filename
-        safe_title = "".join(c for c in title if c.isalnum() or c in (" ", "-", "_")).strip()
-        safe_title = safe_title or "track"
+        # Safe filename without invalid Windows path characters
+        safe_title = "".join(c for c in title if c not in '<>:"/\\|?*').strip() or "track"
 
         thumb_path = os.path.join(download_dir, f"{safe_title}.jpg")
-        output_template = os.path.join(download_dir, f"{safe_title}.%(ext)s")
+        raw_audio_path = os.path.join(download_dir, f"{safe_title}_raw.mp4")
+        final_audio_path = os.path.join(download_dir, f"{safe_title}.m4a")
 
         # 1. Download cover image
         cover_art = None
@@ -474,101 +451,59 @@ class Spotify:
             except Exception as e:
                 logger.warning(f"Failed to download cover image: {e}")
 
-        # 2. Download audio via yt-dlp in a thread
-        if track_data.get("url") and "youtube.com" in track_data.get("url"):
-            query = track_data["url"]
-        else:
-            query = f"ytsearch1:{artists} - {title} audio"
-        logger.info(f"Downloading track via yt-dlp: {query}")
+        # 2. Find and download audio from JioSaavn CDN
+        bitrate = 320 if quality == "320kbps" else 160
+        js = Jiosaavn()
 
-        has_ffmpeg = bool(shutil.which("ffmpeg"))
-        bitrate_str = "320" if quality == "320kbps" else "160"
+        # Clean title for best JioSaavn match
+        clean_title = re.sub(r'\(.*?\)|\[.*?\]', '', title).strip()
+        first_artist = artists.split(",")[0].strip()
+        search_query = f"{clean_title} {first_artist}".strip()
+        logger.info(f"Matching Spotify track on JioSaavn CDN: '{search_query}'")
 
-        ydl_opts = {
-            "format": "ba[ext=m4a]/ba/b[ext=m4a]/bestaudio/best",
-            "outtmpl": output_template,
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android", "web"]
-                }
-            }
-        }
+        js_resp = await js.search(query=search_query, search_type="songs", page_no=1, page_size=5)
+        results = js_resp.get("results", [])
 
-        if has_ffmpeg:
-            ydl_opts["postprocessors"] = [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": bitrate_str,
-            }]
+        if not results:
+            # Fallback to searching title only
+            js_resp = await js.search(query=clean_title, search_type="songs", page_no=1, page_size=5)
+            results = js_resp.get("results", [])
 
-        loop = asyncio.get_running_loop()
+        if not results:
+            raise FileNotFoundError(f"Song '{title}' could not be matched on the music database.")
 
-        def _run_ydl():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(query, download=True)
-                return info
+        matched_song = results[0]
+        perma_url = matched_song.get("perma_url", "")
+        matched_id = perma_url.rsplit("/", 1)[-1]
 
-        await loop.run_in_executor(None, _run_ydl)
+        logger.info(f"Downloading JioSaavn CDN audio for '{title}' (ID: {matched_id}, bitrate: {bitrate}kbps)")
+        await js.download_song(song_id=matched_id, bitrate=bitrate, download_location=raw_audio_path)
 
-        # 3. Locate the downloaded file
-        audio_extensions = (".mp3", ".m4a", ".mp4", ".opus", ".webm", ".ogg", ".flac")
-        downloaded_file = None
-        for f in os.listdir(download_dir):
-            if f.endswith(audio_extensions) and safe_title in f:
-                downloaded_file = os.path.join(download_dir, f)
-                break
+        if not os.path.exists(raw_audio_path):
+            raise FileNotFoundError("Audio file download failed.")
 
-        if not downloaded_file:
-            # Fallback to any audio file in the folder
-            for f in os.listdir(download_dir):
-                if f.endswith(audio_extensions) and not f.endswith(".jpg"):
-                    downloaded_file = os.path.join(download_dir, f)
-                    break
-
-        if not downloaded_file:
-            raise FileNotFoundError("Audio download completed but file was not found on disk.")
-
-        # Convert .mp4 container extension to .m4a for Telegram audio compatibility
-        if downloaded_file.endswith(".mp4"):
-            new_path = os.path.splitext(downloaded_file)[0] + ".m4a"
-            if os.path.exists(new_path):
-                os.remove(new_path)
-            os.rename(downloaded_file, new_path)
-            downloaded_file = new_path
-
-        # 4. Tag the audio file using mutagen
+        # 3. Embed metadata tags with Mutagen
         try:
-            if downloaded_file.endswith(".m4a") or downloaded_file.endswith(".mp4"):
-                audio = MP4(downloaded_file)
-                audio["\xa9nam"] = title
-                if album:
-                    audio["\xa9alb"] = album
-                if artists:
-                    audio["\xa9ART"] = artists
-                if year:
-                    audio["\xa9day"] = str(year)
-                if cover_art:
-                    audio["covr"] = [MP4Cover(cover_art, imageformat=MP4Cover.FORMAT_JPEG)]
-                audio.save()
-            elif downloaded_file.endswith(".mp3"):
-                audio = MP3(downloaded_file, ID3=ID3)
-                try:
-                    audio.add_tags()
-                except Exception:
-                    pass
-                audio.tags.add(TIT2(encoding=3, text=title))
-                audio.tags.add(TPE1(encoding=3, text=artists))
-                if album:
-                    audio.tags.add(TALB(encoding=3, text=album))
-                if year:
-                    audio.tags.add(TDRC(encoding=3, text=str(year)))
-                if cover_art:
-                    audio.tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=cover_art))
-                audio.save()
+            audio = MP4(raw_audio_path)
+            audio["\xa9nam"] = title
+            if album:
+                audio["\xa9alb"] = album
+            elif matched_song.get("more_info", {}).get("album"):
+                audio["\xa9alb"] = matched_song["more_info"]["album"]
+            if artists:
+                audio["\xa9ART"] = artists
+            if year:
+                audio["\xa9day"] = str(year)
+            audio["\xa9cmt"] = f"Powered by NS Bots - {track_data.get('url', '')}"
+            if cover_art:
+                audio["covr"] = [MP4Cover(cover_art, imageformat=MP4Cover.FORMAT_JPEG)]
+            audio.save()
         except Exception as e:
             logger.warning(f"Mutagen tagging failed: {e}")
 
-        return downloaded_file, thumb_path
+        # Rename to final filename
+        if os.path.exists(final_audio_path):
+            os.remove(final_audio_path)
+        os.rename(raw_audio_path, final_audio_path)
+
+        return final_audio_path, thumb_path
