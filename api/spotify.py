@@ -376,11 +376,16 @@ class Spotify:
         bitrate_str = "320" if quality == "320kbps" else "160"
 
         ydl_opts = {
-            "format": "m4a/bestaudio[ext=m4a]/bestaudio/best",
+            "format": "ba[ext=m4a]/ba/b[ext=m4a]/bestaudio/best",
             "outtmpl": output_template,
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "web"]
+                }
+            }
         }
 
         if has_ffmpeg:
@@ -400,21 +405,30 @@ class Spotify:
         await loop.run_in_executor(None, _run_ydl)
 
         # 3. Locate the downloaded file
+        audio_extensions = (".mp3", ".m4a", ".mp4", ".opus", ".webm", ".ogg", ".flac")
         downloaded_file = None
         for f in os.listdir(download_dir):
-            if f.endswith((".mp3", ".m4a", ".opus", ".webm")) and safe_title in f:
+            if f.endswith(audio_extensions) and safe_title in f:
                 downloaded_file = os.path.join(download_dir, f)
                 break
 
         if not downloaded_file:
             # Fallback to any audio file in the folder
             for f in os.listdir(download_dir):
-                if f.endswith((".mp3", ".m4a", ".opus", ".webm")):
+                if f.endswith(audio_extensions) and not f.endswith(".jpg"):
                     downloaded_file = os.path.join(download_dir, f)
                     break
 
         if not downloaded_file:
             raise FileNotFoundError("Audio download completed but file was not found on disk.")
+
+        # Convert .mp4 container extension to .m4a for Telegram audio compatibility
+        if downloaded_file.endswith(".mp4"):
+            new_path = os.path.splitext(downloaded_file)[0] + ".m4a"
+            if os.path.exists(new_path):
+                os.remove(new_path)
+            os.rename(downloaded_file, new_path)
+            downloaded_file = new_path
 
         # 4. Tag the audio file using mutagen
         try:
