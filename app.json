@@ -1,30 +1,26 @@
 {
-  "name": "Jiosaavn Bot",
-  "description": "This is a telegram bot to search and download Jiosaavn songs",
-  "repository": "https://github.com/Ns-AnoNymouS/jiosaavn",
-  "logo": "https://telegra.ph/file/668e019e93b622b467e7d.jpg",
+  "name": "PyAudioCore Service",
+  "description": "High-performance Python audio streaming and metadata service",
+  "repository": "https://github.com/yohanrock/py-audio-core",
   "keywords": [
-    "Best",
-    "Jiosaavn",
-    "Songs",
-    "Telegram Bot"
-   ],
+    "Python",
+    "Audio",
+    "API",
+    "Streaming"
+  ],
   "env": {
     "BOT_TOKEN": {
-      "description": "Get it from @BotFather"
+      "description": "Bot authentication token"
     },
     "API_ID": {
-      "description": "Your API_ID, Get it from https://my.telegram.org/"
+      "description": "API ID"
     },
     "API_HASH": {
-      "description": "Your API_HASH, Get it from https://my.telegram.org/"
+      "description": "API Hash"
     },
     "DATABASE_URL": {
-      "description": "Mongodb token for saving the users data",
+      "description": "Database connection string",
       "value": ""
     }
-  },
-  "buildpacks": [
-    {"url": "heroku/python"}
-  ]
+  }
 }
