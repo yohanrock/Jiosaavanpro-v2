@@ -295,13 +295,14 @@ async def download_tool(client: Bot, message: Message|CallbackQuery, msg: Messag
     caption = "\n\n".join(filter(None, text_data))
 
     # Download and upload song
-    download_dir = f"./download/{time.time()}{message.from_user.id}/"
+    download_dir = f"./download/{time.time()}_{message.from_user.id}/"
     if not os.path.isdir(download_dir):
-        os.makedirs(download_dir)
+        os.makedirs(download_dir, exist_ok=True)
 
-    pre_file_name = f"{download_dir}{title}_{quality}.mp4"
-    file_name = f"{download_dir}{title}_{quality}.mp3"
-    thumbnail_location = f"{download_dir}{title}.jpg"
+    safe_title = "".join(c for c in title if c not in '<>:"/\\|?*').strip() or "track"
+    pre_file_name = os.path.join(download_dir, f"{safe_title}_{quality}.mp4")
+    file_name = os.path.join(download_dir, f"{safe_title}_{quality}.mp3")
+    thumbnail_location = os.path.join(download_dir, f"{safe_title}.jpg")
 
     await msg.edit(f"__📥 Downloading {title}__")
     await client.send_chat_action(

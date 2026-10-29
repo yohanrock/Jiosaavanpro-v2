@@ -102,8 +102,12 @@ async def handle_song_callback(client: Bot, callback: CallbackQuery):
 
     await msg.edit(text=text[:4096], reply_markup=InlineKeyboardMarkup(buttons))
     
-    # required to create some traffic to koyeb to keep it running
-    await Jiosaavn()._request_data(url=f"http://{HOST}:{PORT}")
+    # Optional traffic keep-alive ping (safe on Windows and cloud hosts)
+    try:
+        ping_host = "127.0.0.1" if HOST in ("0.0.0.0", "") else HOST
+        await Jiosaavn()._request_data(url=f"http://{ping_host}:{PORT}")
+    except Exception as e:
+        logger.debug(f"Keep-alive ping ignored: {e}")
 
 @Bot.on_callback_query(filters.regex(r"^lyrics#"))
 async def lyrics(client: Bot, callback: CallbackQuery):
