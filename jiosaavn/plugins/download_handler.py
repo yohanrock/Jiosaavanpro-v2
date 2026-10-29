@@ -6,6 +6,8 @@ import logging
 
 from jiosaavn.bot import Bot
 from api.jiosaavn import Jiosaavn
+from api.spotify import Spotify
+from jiosaavn.config.settings import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
 
 import aiohttp
 import aiofiles
@@ -16,27 +18,82 @@ from pyrogram.enums import ChatAction
 
 logger = logging.getLogger(__name__)
 
+
 @Bot.on_callback_query(filters.regex(r"^upload#"))
 @Bot.on_message(filters.regex(r"http.*") & filters.private & filters.incoming)
-async def download(client: Bot, message: Message|CallbackQuery):
+async def download(client: Bot, message: Message | CallbackQuery):
     if isinstance(message, CallbackQuery):
-        _, item_id, search_type = message.data.split("#")
+        parts = message.data.split("#")
+        item_id = parts[1]
+        search_type = parts[2] if len(parts) > 2 else "song"
         msg = await message.message.edit("**Processing...**")
+        msg.reply_to_message = message.message.reply_to_message or message.message
     else:
         msg = await message.reply("**Processing...**", quote=True)
         msg.reply_to_message = message
-        query = message.text
-        item_id = query.rsplit("/", 1)[1]
-        if "song" in query:
+        query = message.text.strip()
+
+        # Check if the URL is a Spotify URL
+        if Spotify.is_spotify_url(query):
+            sp_client = Spotify(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
+            sp_type, sp_id = await sp_client.parse_url(query)
+
+            if not sp_type or not sp_id:
+                await msg.edit("⚠️ Invalid or unsupported Spotify link.")
+                return
+
+            if sp_type == "track":
+                await download_spotify_tool(client, message, msg, sp_id, sp_client)
+            elif sp_type in ("album", "playlist"):
+                await msg.edit(f"**🔍 Fetching Spotify {sp_type} tracks...**")
+                collection = await sp_client.get_collection(sp_type, sp_id)
+                if not collection or not collection.get("tracks"):
+                    await msg.edit(f"⚠️ Failed to find any tracks in this Spotify {sp_type}.")
+                    return
+
+                tracks = collection["tracks"]
+                total = len(tracks)
+                coll_title = collection.get("title", f"Spotify {sp_type.capitalize()}")
+                await msg.edit(f"**Found {total} songs in `{coll_title}`. Starting download...**")
+
+                for idx, track in enumerate(tracks, 1):
+                    track_id = track.get("id")
+                    if not track_id:
+                        continue
+                    try:
+                        await download_spotify_tool(client, message, msg, track_id, sp_client)
+                    except Exception as err:
+                        logger.error(f"Error downloading Spotify track {track_id} in {sp_type}: {err}")
+            else:
+                await msg.edit(f"Spotify {sp_type} upload not supported.")
+                return
+
+            if "Failed" not in msg.text:
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+            return
+
+        # JioSaavn URL handling
+        clean_url = query.rstrip("/")
+        item_id = clean_url.rsplit("/", 1)[-1]
+        search_type = "song"
+        if "song" in clean_url:
             search_type = "song"
-        elif "album" in query:
+        elif "album" in clean_url:
             search_type = "album"
-        elif "featured" in query:
+        elif "featured" in clean_url:
             search_type = "playlist"
-        elif "artist" in query:
+        elif "artist" in clean_url:
             search_type = "artist"
 
-    if search_type == "song":
+    # Callback or JioSaavn path
+    if item_id.startswith("sp_"):
+        sp_client = Spotify(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
+        actual_track_id = item_id.replace("sp_", "", 1)
+        await download_spotify_tool(client, message, msg, actual_track_id, sp_client)
+    elif search_type == "song":
         await download_tool(client, message, msg, item_id)
     elif search_type in ("album", "playlist"):
         page_no = 1
@@ -66,7 +123,122 @@ async def download(client: Bot, message: Message|CallbackQuery):
         return
 
     if "Failed" not in msg.text:
-        await msg.delete()
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+
+async def download_spotify_tool(
+    client: Bot,
+    message: Message | CallbackQuery,
+    msg: Message,
+    track_id: str,
+    spotify: Spotify = None
+):
+    """
+    Downloads and uploads a Spotify track following the exact same caching and UI flow as JioSaavn.
+    """
+    if spotify is None:
+        spotify = Spotify(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
+
+    db_song_id = f"sp_{track_id}"
+    is_exist = await client.db.is_song_id_exist(db_song_id)
+    user = await client.db.get_user(message.from_user.id)
+    quality = user.get('quality', '320kbps')
+
+    # Check cache in DB
+    if is_exist:
+        song_entry = await client.db.get_song(db_song_id)
+        if song_entry and song_entry.get(quality):
+            cached = song_entry[quality]
+            try:
+                song_msg = await client.get_messages(
+                    chat_id=int(cached.get('chat_id')),
+                    message_ids=int(cached.get('message_id'))
+                )
+                if not song_msg.empty:
+                    reply_to = msg.reply_to_message.id if getattr(msg, "reply_to_message", None) else None
+                    is_sent = await song_msg.copy(message.from_user.id, reply_to_message_id=reply_to)
+                    if is_sent:
+                        return
+            except Exception as e:
+                logger.warning(f"Error copying cached Spotify song: {e}")
+
+    # Fetch track metadata
+    track_data = await spotify.get_track(track_id)
+    if not track_data or not track_data.get("title"):
+        await msg.edit(f"⚠️ Could not retrieve metadata for Spotify track `{track_id}`.")
+        return
+
+    title = track_data.get("title", "Unknown")
+    artists = track_data.get("artists", "Unknown Artist")
+    album = track_data.get("album", "")
+    album_url = track_data.get("album_url", "")
+    release_date = track_data.get("release_date", "")
+    year = track_data.get("year", "")
+    image_url = track_data.get("image", "")
+    duration = int(track_data.get("duration", 0))
+    song_url = track_data.get("url", f"https://open.spotify.com/track/{track_id}")
+
+    # Create caption (same format as JioSaavn)
+    album_line = f"**📚 Album:** [{album}]({album_url})" if album and album_url else (f"**📚 Album:** {album}" if album else "")
+    text_data = [
+        f"[\u2063]({image_url})" if image_url else "",
+        f"**🎧 Song:** [{title}]({song_url})" if title else "",
+        f"**🎤 Artist:** {artists}" if artists else "",
+        album_line,
+        f"**📆 Release Date:** __{release_date}__" if release_date else "",
+        f"**📆 Release Year:** __{year}__" if not release_date and year else "",
+    ]
+    caption = "\n\n".join(filter(None, text_data))
+
+    download_dir = f"./download/{time.time()}_{message.from_user.id}/"
+    if not os.path.isdir(download_dir):
+        os.makedirs(download_dir, exist_ok=True)
+
+    try:
+        await msg.edit(f"__📥 Downloading {title} ({artists})__")
+        await client.send_chat_action(
+            chat_id=message.from_user.id,
+            action=ChatAction.RECORD_AUDIO
+        )
+
+        audio_file, thumb_file = await spotify.download_track(
+            track_data=track_data,
+            download_dir=download_dir,
+            quality=quality
+        )
+
+        await msg.edit(f"__📤 Uploading {title}__")
+        await client.send_chat_action(
+            chat_id=message.from_user.id,
+            action=ChatAction.UPLOAD_AUDIO
+        )
+
+        reply_to_id = msg.reply_to_message.id if getattr(msg, "reply_to_message", None) else None
+        song_file = await client.send_audio(
+            chat_id=message.from_user.id,
+            audio=audio_file,
+            caption=caption,
+            duration=duration,
+            title=title,
+            thumb=thumb_file if (thumb_file and os.path.exists(thumb_file)) else None,
+            performer=artists,
+            reply_to_message_id=reply_to_id,
+        )
+
+        if not song_file:
+            return await msg.edit(text=f"Failed to upload {title}")
+
+        await client.db.update_song(db_song_id, quality, song_file.chat.id, song_file.id)
+    except Exception as e:
+        logger.error(f"Error downloading Spotify track {track_id}: {e}")
+        await msg.edit(f"⚠️ Error downloading {title}: {e}")
+    finally:
+        if os.path.isdir(download_dir):
+            shutil.rmtree(download_dir, ignore_errors=True)
+
 
 async def download_tool(client: Bot, message: Message|CallbackQuery, msg: Message, song_id: str):
     is_exist = await client.db.is_song_id_exist(song_id)

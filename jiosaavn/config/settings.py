@@ -13,3 +13,6 @@ BOT_COMMANDS = (
 DATABASE_URL = getenv("DATABASE_URL", "mongodb+srv://Chinnimummy16:Chinnimummy16@moviescluster.yx3b9in.mongodb.net/?retryWrites=true&w=majority&appName=Moviescluster")
 HOST = getenv("HOST", "0.0.0.0")
 PORT = int(getenv("PORT", "8080"))
+
+SPOTIFY_CLIENT_ID = getenv("SPOTIFY_CLIENT_ID", "")
+SPOTIFY_CLIENT_SECRET = getenv("SPOTIFY_CLIENT_SECRET", "")
