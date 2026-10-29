@@ -2,6 +2,7 @@ services:
   - type: web
     name: jiosaavanpro-bot
     runtime: python
+    repo: https://github.com/yohanrock/Jiosaavanpro-v2.git
     plan: free
     region: oregon
     branch: main
